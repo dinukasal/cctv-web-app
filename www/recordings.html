@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>Recordings</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 14px 16px 40px; background: #0d1117; color: #e6edf3;
+         font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .hint { color: #8b949e; font-size: 12px; }
+  .wrap { display: grid; grid-template-columns: 420px 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 1000px) { .wrap { grid-template-columns: 1fr; } }
+  .panel { background: #161b22; border: 1px solid #30363d; border-radius: 10px; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px; border-bottom: 1px solid #30363d; }
+  select, input { font: inherit; font-size: 12px; padding: 4px 6px; border-radius: 6px;
+                  background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+  input[type=search] { flex: 1; min-width: 120px; }
+  #count { color: #8b949e; font-size: 12px; padding: 8px 10px 0; }
+  #list { max-height: 70vh; overflow: auto; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer;
+         border-bottom: 1px solid #21262d; font-size: 12px; }
+  .row:hover { background: #1c2430; }
+  .row.sel { background: #1f6feb22; }
+  .row .t { font-variant-numeric: tabular-nums; color: #c9d1d9; }
+  .row .c { color: #8b949e; flex: 1; }
+  .row .s { color: #6e7681; font-variant-numeric: tabular-nums; }
+  .day { padding: 8px 10px 4px; font-weight: 600; font-size: 12px; color: #8b949e;
+         background: #0d1117; position: sticky; top: 0; border-bottom: 1px solid #21262d; }
+  .row.live { opacity: .6; }
+  .rec { color: #d29922; font-size: 11px; font-style: italic; }
+  video { width: 100%; background: #000; border-radius: 8px; }
+  .player { padding: 10px; }
+  #status { padding: 8px 10px; font-size: 12px; color: #8b949e; min-height: 18px; }
+  .err { color: #f85149; }
+  .ok { color: #3fb950; }
+  footer { margin-top: 16px; color: #8b949e; font-size: 12px; line-height: 1.7; }
+  code { background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 1px 5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📼 Recordings</h1>
+  <a href="/">← live view</a>
+  <span class="hint">clips are converted on first play, then instant</span>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <div class="controls">
+      <select id="fSource"><option value="">all sources</option></select>
+      <select id="fCamera"><option value="">all cameras</option></select>
+      <select id="fDay"><option value="">all days</option></select>
+      <input type="search" id="fText" placeholder="filter by name…">
+    </div>
+    <div id="count">loading…</div>
+    <div id="list"></div>
+  </div>
+
+  <div class="panel">
+    <div class="player">
+      <video id="v" controls playsinline preload="metadata"></video>
+      <div id="status">Pick a clip on the left.</div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  Sources: the <b>backup</b> folder is recorded by go2rtc (MP4, plays instantly);
+  <b>VMS</b> folders are the vendor recorder's clips (.avi, raw .h265) which are
+  remuxed or transcoded the first time you open them.<br>
+  Recordings stay on the camera host — nothing is uploaded anywhere.
+</footer>
+
+<script>
+const listEl = document.getElementById('list');
+const statusEl = document.getElementById('status');
+const video = document.getElementById('v');
+const fSource = document.getElementById('fSource');
+const fCamera = document.getElementById('fCamera');
+const fDay = document.getElementById('fDay');
+const fText = document.getElementById('fText');
+
+let CLIPS = [];
+let pollTimer = null;
+
+function fmtSize(mb) { return mb >= 1024 ? (mb/1024).toFixed(2) + ' GB' : mb.toFixed(1) + ' MB'; }
+
+function uniqueSorted(values) { return [...new Set(values)].sort(); }
+
+async function load() {
+  const r = await fetch('/api/recordings');
+  const data = await r.json();
+  CLIPS = data.clips || [];
+  for (const s of uniqueSorted(CLIPS.map(c => c.source))) fSource.appendChild(new Option(s, s));
+  // One entry per CAMERA, not per folder. The same camera shows up under two naming
+  // schemes - the recorder's "cam104_hd" and the vendor's "Ch1_192.168.1.104" - so
+  // filtering by folder name only ever matched half of that camera's clips, and the
+  // list showed the same camera twice under two different labels.
+  const camOpts = new Map();
+  for (const c of CLIPS) {
+    const key = c.ip || '(unknown)';
+    if (!camOpts.has(key)) camOpts.set(key, c.label || c.camera);
+  }
+  [...camOpts.entries()]
+    .sort((a, b) => a[1].localeCompare(b[1], undefined, { numeric: true }))
+    .forEach(([value, text]) => fCamera.appendChild(new Option(text, value)));
+  for (const d of uniqueSorted(CLIPS.map(c => (c.start || '').slice(0, 10)).filter(Boolean)).reverse())
+    fDay.appendChild(new Option(d, d));
+  render();
+}
+
+function filtered() {
+  const s = fSource.value, c = fCamera.value, d = fDay.value, t = fText.value.toLowerCase();
+  return CLIPS.filter(cl =>
+    (!s || cl.source === s) &&
+    (!c || (cl.ip || '(unknown)') === c) &&
+    (!d || (cl.start || '').startsWith(d)) &&
+    (!t || cl.name.toLowerCase().includes(t)));
+}
+
+function render() {
+  const rows = filtered();
+  document.getElementById('count').textContent =
+    rows.length + ' clip' + (rows.length === 1 ? '' : 's') +
+    (rows.length < CLIPS.length ? ' (of ' + CLIPS.length + ')' : '');
+  listEl.innerHTML = '';
+  let day = '';
+  const LIMIT = 400;
+  rows.slice(0, LIMIT).forEach(cl => {
+    const d = (cl.start || '').slice(0, 10);
+    if (d && d !== day) {
+      day = d;
+      const h = document.createElement('div');
+      h.className = 'day';
+      h.textContent = d;
+      listEl.appendChild(h);
+    }
+    const row = document.createElement('div');
+    row.className = 'row' + (cl.live ? ' live' : '');
+    row.dataset.id = cl.id;
+    const time = (cl.start || '').slice(11) || cl.name;
+    // a clip another process still has open cannot be played yet - say so up front
+    const rec = cl.live ? ' <span class="rec">recording…</span>' : '';
+    row.innerHTML = `<span class="t">${time}</span>
+                     <span class="c">${cl.label || cl.camera}${rec}</span>
+                     <span class="s">${fmtSize(cl.mb)}</span>`;
+    row.onclick = () => play(cl, row);
+    listEl.appendChild(row);
+  });
+  if (rows.length > LIMIT) {
+    const more = document.createElement('div');
+    more.className = 'day';
+    more.textContent = `… ${rows.length - LIMIT} more — narrow the filters`;
+    listEl.appendChild(more);
+  }
+}
+
+// The status endpoint only *reports* on a conversion - this one starts it.
+// Without this call the page would poll forever and nothing would convert.
+async function kick(clip) {
+  try {
+    await fetch('/api/recstart?f=' + encodeURIComponent(clip.id), { cache: 'no-store' });
+  } catch (e) { /* the poll loop retries */ }
+}
+
+async function play(clip, row) {
+  document.querySelectorAll('.row.sel').forEach(e => e.classList.remove('sel'));
+  row.classList.add('sel');
+  clearInterval(pollTimer);
+  video.removeAttribute('src');
+  video.load();
+  statusEl.className = '';
+  statusEl.textContent = `Opening ${clip.name} (${fmtSize(clip.mb)})…`;
+
+  // A clip another process still has open is not readable yet - say so before
+  // touching the player, otherwise the browser reports an opaque demuxer error.
+  if (clip.live) {
+    statusEl.className = 'hint';
+    statusEl.textContent = `${clip.label || clip.camera} · ${clip.start} · ${fmtSize(clip.mb)} — ` +
+      'still being recorded. It becomes playable a moment after the recorder closes the file.';
+    return;
+  }
+
+  if (clip.direct) { start(clip, true); return; }
+
+  // remux or transcode into the cache first, then play the result
+  statusEl.textContent = 'Preparing…';
+  await kick(clip);
+  statusEl.textContent = 'Converting for browser playback…';
+
+  let ticks = 0;
+  pollTimer = setInterval(async () => {
+    ticks++;
+    try {
+      const r = await fetch('/api/recstatus?f=' + encodeURIComponent(clip.id), { cache: 'no-store' });
+      const st = await r.json();
+      if (st.state === 'ready') {
+        clearInterval(pollTimer);
+        statusEl.textContent = 'Ready.';
+        start(clip, false);
+      } else if (st.state === 'error') {
+        clearInterval(pollTimer);
+        statusEl.className = 'err';
+        statusEl.textContent = 'Conversion failed: ' + (st.error || 'unknown') + '  (click the clip again to retry)';
+      } else {
+        // 'new' means no conversion is in flight - e.g. the service was restarted
+        // since the click, so the in-memory state was lost. Start it again.
+        if (st.state === 'new' || ticks % 8 === 0) kick(clip);
+        const mb = (st.bytes || 0) / 1048576;
+        const stall = st.stalled_for ? `  ·  no progress for ${st.stalled_for}s` : '';
+        statusEl.textContent = `Converting… ${mb.toFixed(1)} MB written of ${st.src_mb ?? '?'} MB${stall}`;
+      }
+    } catch (e) {
+      clearInterval(pollTimer);
+      statusEl.className = 'err';
+      statusEl.textContent = 'Lost contact with the server.';
+    }
+  }, 1500);
+}
+
+function start(clip, direct) {
+  // report what the browser actually does, instead of claiming success
+  video.onerror = () => {
+    const e = video.error;
+    statusEl.className = 'err';
+    statusEl.textContent = 'The browser could not play this clip' +
+      (e ? ` (code ${e.code}${e.message ? ': ' + e.message : ''})` : '') +
+      ' — try another, or click this one again.';
+  };
+  video.onloadedmetadata = () => {
+    statusEl.className = 'ok';
+    statusEl.textContent = `${clip.label || clip.camera} · ${clip.start} · ${fmtSize(clip.mb)}` +
+      ` · ${video.videoWidth}x${video.videoHeight}` + (direct ? '' : ' · converted');
+  };
+  statusEl.className = '';
+  statusEl.textContent = `Loading ${clip.name}…`;
+  video.src = '/rec/stream?f=' + encodeURIComponent(clip.id);
+  video.play().catch(() => {});
+}
+
+[fSource, fCamera, fDay].forEach(el => el.onchange = render);
+fText.oninput = render;
+load().catch(e => {
+  document.getElementById('count').textContent = 'failed to load: ' + e;
+});
+</script>
+</body>
+</html>

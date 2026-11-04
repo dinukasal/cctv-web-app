@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>CCTV</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px 16px 40px;
+    background: #0d1117; color: #e6edf3;
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  .hint { color: #8b949e; font-size: 12px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
+  .bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: #1c2430; border-bottom: 1px solid #30363d; }
+  .name { font-weight: 600; font-size: 13px; flex: 1; }
+  .ip { color: #6e7681; font-size: 11px; font-weight: 400; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #d29922; transition: background .3s; flex: none; }
+  .dot.live { background: #3fb950; box-shadow: 0 0 6px #3fb950; }
+  .dot.dead { background: #f85149; }
+  .mode { font-size: 10px; color: #8b949e; text-transform: uppercase; letter-spacing: .5px; }
+  button, a.btn, select { font: inherit; font-size: 11px; padding: 3px 6px; border-radius: 6px; cursor: pointer;
+    background: #21262d; color: #c9d1d9; border: 1px solid #30363d; text-decoration: none; }
+  button:hover, a.btn:hover, select:hover { background: #30363d; }
+  button.on { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .stage { position: relative; background: #000; aspect-ratio: 4 / 3; }
+  .stage iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #000; }
+  footer { margin-top: 18px; color: #8b949e; font-size: 12px; line-height: 1.7; }
+  code { background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 1px 5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🏠 CCTV</h1>
+  <span class="hint" id="ctx">connecting…</span>
+  <button id="allhd">All HD</button>
+  <button id="allsub">All low</button>
+</header>
+
+<div class="grid" id="grid"></div>
+
+<footer>
+  Relayed by <b>go2rtc</b> on the Windows laptop — <code>:1984</code> web API, <code>:8554</code> RTSP re-export,
+  <code>:8555</code> WebRTC. The H.265 cameras are transcoded to H.264 on the NVIDIA GPU.<br>
+  Each tile tries its modes in order and falls back by itself; if one stays black, choose a
+  different mode from that tile's dropdown.
+</footer>
+
+<script>
+const HOST = location.hostname || "192.168.1.146";
+// LAN: page is http on :8880, go2rtc answers on :1984, WebRTC is best (lowest latency).
+// Tunnel: page is https and the tunnel hostname points straight at go2rtc, so
+// everything is same-origin and only HTTP-based modes survive - no UDP for WebRTC.
+const IS_TUNNEL = location.protocol === 'https:';
+const GO   = IS_TUNNEL ? location.origin : `http://${HOST}:1984`;
+const MODES = IS_TUNNEL ? ['mse', 'hls', 'webrtc'] : ['webrtc', 'mse', 'hls'];
+const OVERRIDE = new URLSearchParams(location.search).get('mode');
+document.getElementById('ctx').textContent =
+  (IS_TUNNEL ? 'via tunnel' : 'on the local network') + ' · trying ' + MODES.join(' → ');
+
+// sub = low-bandwidth stream, hd = full resolution
+const CAMS = [
+  { name: "Garden Front", ip: "192.168.1.101", sub: "cam101", hd: "cam101_hd" },
+  { name: "Front Gate",   ip: "192.168.1.106", sub: "cam106", hd: "cam106_hd" },
+  { name: "Carport",      ip: "192.168.1.234", sub: "cam234", hd: "cam234_hd" },
+  { name: "Hall",         ip: "192.168.1.105", sub: "cam105", hd: "cam105_hd" },
+  { name: "Garage",       ip: "192.168.1.103", sub: "cam103", hd: "cam103_hd" },
+  { name: "Driveway",     ip: "192.168.1.104", sub: "cam104", hd: "cam104_hd" },
+  { name: "Side",         ip: "192.168.1.108", sub: "cam108", hd: "cam108_hd" },
+];
+
+const grid = document.getElementById('grid');
+
+for (const cam of CAMS) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <div class="bar">
+      <span class="dot" data-dot></span>
+      <span class="name">${cam.name} <span class="ip">${cam.ip}</span></span>
+      <span class="mode" data-mode></span>
+      <button data-sub class="on">Low</button>
+      <button data-hd>HD</button>
+      <select data-sel title="Stream mode"></select>
+      <a class="btn" data-full target="_blank" title="Open fullscreen">⛶</a>
+    </div>
+    <div class="stage"><iframe allow="autoplay; fullscreen" data-frame></iframe></div>`;
+  grid.appendChild(card);
+
+  const frame  = card.querySelector('[data-frame]');
+  const dot    = card.querySelector('[data-dot]');
+  const modeEl = card.querySelector('[data-mode]');
+  const sel    = card.querySelector('[data-sel]');
+  const bSub   = card.querySelector('[data-sub]');
+  const bHd    = card.querySelector('[data-hd]');
+
+  for (const m of MODES) sel.appendChild(new Option(m, m));
+  sel.value = OVERRIDE || MODES[0];
+
+  let stream  = cam.sub;
+  let attempt = MODES.indexOf(sel.value);
+  let timer   = null;
+
+  const stopTimer = () => { if (timer) { clearInterval(timer); timer = null; } };
+
+  // On the tunnel the player is same-origin, so a tile that never starts can be
+  // detected and retried in the next mode automatically. On the LAN the iframe is
+  // on another port (different origin) and unreadable - WebRTC is reliable there,
+  // and the dropdown still allows a manual switch.
+  const watch = () => {
+    stopTimer();
+    if (!IS_TUNNEL) return;
+    const deadline = Date.now() + 14000;
+    timer = setInterval(() => {
+      let ready = -1;
+      try {
+        const v = frame.contentDocument.querySelector('video');
+        ready = v ? v.readyState : -1;
+      } catch (e) { stopTimer(); return; }
+      if (ready >= 2) { dot.className = 'dot live'; stopTimer(); return; }
+      if (Date.now() > deadline) {
+        stopTimer();
+        if (attempt < MODES.length - 1) { attempt++; sel.value = MODES[attempt]; load(); }
+        else dot.className = 'dot dead';
+      }
+    }, 1500);
+  };
+
+  const load = () => {
+    dot.className = 'dot';
+    const m = sel.value;
+    modeEl.textContent = m;
+    // cache-buster so a stale player page is never reused
+    frame.src = `${GO}/stream.html?src=${stream}&mode=${m}&background=false&v=${Date.now()}`;
+    watch();
+  };
+
+  const pick = (hd) => {
+    bSub.classList.toggle('on', !hd);
+    bHd.classList.toggle('on', hd);
+    stream  = hd ? cam.hd : cam.sub;
+    attempt = MODES.indexOf(sel.value);
+    load();
+  };
+
+  bSub.onclick = () => pick(false);
+  bHd.onclick  = () => pick(true);
+  sel.onchange = () => { attempt = MODES.indexOf(sel.value); load(); };
+  card.querySelector('[data-full]').href = `${GO}/stream.html?src=${cam.hd}&mode=${sel.value}`;
+
+  // stop streams scrolled far off screen, resume when they come back
+  // ('about:blank' is a truthy string, so compare explicitly - a bare !frame.src
+  // never matches after blanking, which silently strands the tile forever)
+  const isBlank = () => !frame.src || frame.src === 'about:blank';
+  new IntersectionObserver(([e]) => {
+    if (!e.isIntersecting && !isBlank()) { stopTimer(); frame.src = 'about:blank'; }
+    else if (e.isIntersecting && isBlank()) load();
+  }, { threshold: 0 }).observe(card);
+
+  load();
+}
+
+document.getElementById('allhd').onclick  = () => document.querySelectorAll('[data-hd]').forEach(b => b.click());
+document.getElementById('allsub').onclick = () => document.querySelectorAll('[data-sub]').forEach(b => b.click());
+</script>
+</body>
+</html>

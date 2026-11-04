@@ -1,0 +1,77 @@
+﻿log:
+  level: info
+api:
+  listen: ":1984"
+rtsp:
+  listen: ":8554"
+webrtc:
+  listen: ":8555"
+  candidates:
+    - 192.168.1.146:8555
+    - 192.168.1.224:8555
+ffmpeg:
+  bin: C:\go2rtc\ffmpeg.exe
+  # GTX 1050 -> NVENC H.264. Only the three H.265 cameras (.105/.106/.234) use
+  # ffmpeg, and only while a browser is watching them: recordings and the
+  # self-scan read the _raw H.265 streams, so nothing transcodes around the clock.
+
+# ============================================================================
+# 7 XM/Xiongmai-family cameras. Three different transports, all native:
+#
+# .101 .106 .234  plain RTSP on 554. User "admin", password ignored.
+#                 URL: /user=admin&password=&channel=1&stream=<0|1>.sdp?real_stream
+#                 stream=0 main, stream=1 substream.  .106/.234 are H.265, so
+#                 they have _raw streams (stored/analysed as H.265) plus H.264
+#                 versions transcoded on the GPU for Chrome, on demand.
+#
+# .105            RTSP is switched off on this camera; it only answers the XM
+#                 DVRIP/Sofia SDK on 34567, which go2rtc speaks natively.
+#
+# .103 .104 .108  RTSP lives on port 10554 with a /tcp/av0_N path (not 554),
+#                 and it REQUIRES the real password. These URLs came straight out
+#                 of the cameras' ONVIF media service (port 10080) - they are all
+#                 H.264 already, so no transcoding.
+# ============================================================================
+streams:
+  # --- .101 garden front, H.264 -------------------------------------------
+  cam101:      "rtsp://admin:YOUR-CAMERA-PASSWORD@192.168.1.101:554/user=admin&password=&channel=1&stream=1.sdp?real_stream"
+  cam101_hd:   "rtsp://admin:YOUR-CAMERA-PASSWORD@192.168.1.101:554/user=admin&password=&channel=1&stream=0.sdp?real_stream"
+
+  # --- .106 front gate, H.265 ---------------------------------------------
+  # _raw is the camera's own H.265, untouched: the recorder and the self-scan
+  # read these, so no transcoder has to run around the clock. The plain names
+  # are the H.264 the browser needs, produced only while somebody is watching.
+  cam106_raw:    "rtsp://admin:YOUR-CAMERA-PASSWORD@192.168.1.106:554/user=admin&password=&channel=1&stream=1.sdp?real_stream"
+  cam106_hd_raw: "rtsp://admin:YOUR-CAMERA-PASSWORD@192.168.1.106:554/user=admin&password=&channel=1&stream=0.sdp?real_stream"
+  cam106:        "ffmpeg:cam106_raw#video=h264#hardware=cuda"
+  cam106_hd:     "ffmpeg:cam106_hd_raw#video=h264#hardware=cuda"
+
+  # --- .234 carport, H.265 ------------------------------------------------
+  cam234_raw:    "rtsp://admin:YOUR-CAMERA-PASSWORD@192.168.1.234:554/user=admin&password=&channel=1&stream=1.sdp?real_stream"
+  cam234_hd_raw: "rtsp://admin:YOUR-CAMERA-PASSWORD@192.168.1.234:554/user=admin&password=&channel=1&stream=0.sdp?real_stream"
+  cam234:        "ffmpeg:cam234_raw#video=h264#hardware=cuda"
+  cam234_hd:     "ffmpeg:cam234_hd_raw#video=h264#hardware=cuda"
+
+  # --- .105 hall, no RTSP at all -> DVRIP SDK on 34567 --------------------
+  # The camera sends HEVC, which no browser plays, so it is transcoded on the
+  # GPU. ffmpeg cannot speak dvrip, so it reads the raw stream back from go2rtc
+  # itself by name (cam105_raw) - the documented way to chain a transcode.
+  cam105_raw:  "dvrip://admin:YOUR-CAMERA-PASSWORD@192.168.1.105:34567?channel=0&subtype=1"
+  cam105_hd_raw: "dvrip://admin:YOUR-CAMERA-PASSWORD@192.168.1.105:34567?channel=0&subtype=0"
+  cam105:      "ffmpeg:cam105_raw#video=h264#hardware=cuda"
+  cam105_hd:   "ffmpeg:cam105_hd_raw#video=h264#hardware=cuda"
+
+  # --- .103 garage, H.264 on RTSP port 10554 ------------------------------
+  cam103:      "rtsp://admin:YOUR-CAMERA-PASSWORD@192.168.1.103:10554/tcp/av0_1"
+  cam103_hd:   "rtsp://admin:YOUR-CAMERA-PASSWORD@192.168.1.103:10554/tcp/av0_0"
+
+  # --- .104 driveway, H.264 on RTSP port 10554 ----------------------------
+  cam104:      "rtsp://admin:YOUR-CAMERA-PASSWORD@192.168.1.104:10554/tcp/av0_1"
+  cam104_hd:   "rtsp://admin:YOUR-CAMERA-PASSWORD@192.168.1.104:10554/tcp/av0_0"
+
+  # --- .108 side, H.264 on RTSP port 10554 --------------------------------
+  cam108:      "rtsp://admin:YOUR-CAMERA-PASSWORD@192.168.1.108:10554/tcp/av0_1"
+  cam108_hd:   "rtsp://admin:YOUR-CAMERA-PASSWORD@192.168.1.108:10554/tcp/av0_0"
+  ztest:
+    - dvrip://admin:YOUR-CAMERA-PASSWORD@192.168.1.101:34567?channel=0&subtype=1
+

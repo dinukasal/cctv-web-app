@@ -1,0 +1,307 @@
+﻿# ============================================================================
+#  Continuous camera recorder for the cameras VMS fails to record.
+#
+#  Pulls the HIGH QUALITY (main) streams from go2rtc on localhost, because
+#  go2rtc reconnects aggressively where VMS's vendor session silently dies.
+#  Writes 30-minute fragmented-MP4 segments, restarts any ffmpeg that dies,
+#  and prunes old files so the disk cannot fill.
+#
+#  Runs as the NSSM service "go2rtc-recorder" (Automatic, restart on failure).
+#  Log: D:\Records\go2rtc\recorder.log
+#
+#  To add or remove a camera, edit $cameras below.
+# ============================================================================
+
+$ErrorActionPreference = 'Continue'
+
+$ff              = 'C:\go2rtc\ffmpeg.exe'
+$root            = 'E:\Records\go2rtc'
+$segmentMinutes  = 10          # minutes per file
+$keepDays        = 14          # delete segments older than this
+$pruneEveryMin   = 10
+$restartDelaySec = 10
+
+# stream names from go2rtc.yaml; "_hd" = main/high-quality stream.
+# All seven cameras: the three H.265 ones (105/106/234) arrive already
+# transcoded to H.264 by go2rtc on the NVIDIA GPU, so every recording here is a
+# straight stream copy - no re-encoding, negligible CPU.
+$cameras = @(
+  'cam101_hd',   # 192.168.1.101  garden front   (H.264 5MP)
+  'cam103_hd',   # 192.168.1.103  garage/entry   (H.264 1080p)
+  'cam104_hd',   # 192.168.1.104  driveway       (H.264 1080p)
+  'cam105_hd',   # 192.168.1.105  hall           (H.265 -> H.264)
+  'cam106_hd',   # 192.168.1.106  front gate     (H.265 -> H.264)
+  'cam108_hd',   # 192.168.1.108  side           (H.264 1080p)
+  'cam234_hd'    # 192.168.1.234  carport        (H.265 -> H.264)
+)
+
+New-Item -ItemType Directory -Force -Path $root | Out-Null
+$logFile = Join-Path $root 'recorder.log'
+
+function Log($msg) {
+  $line = "{0}  {1}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $msg
+  Write-Host $line
+  try { Add-Content -Path $logFile -Value $line -Encoding utf8 } catch {}
+}
+
+$procs = @{}
+$outFile = @{}
+$lastSize = @{}
+$lastChange = @{}
+$stallMinutes = 3      # restart a recorder whose file hasn't grown in this long
+$restarts = @{}        # per camera, so the dashboard can show flapping
+foreach ($c in $cameras) { $restarts[$c] = 0 }
+
+# The dashboard (served by proxy.py from C:\go2rtc) reads this to show recording
+# state. It lives at a FIXED path on purpose: the recordings themselves can be
+# moved to another drive, and the reader should not have to know where.
+$statusFile = 'C:\go2rtc\recorder-status.json'
+$agg = @{}             # per camera: @{files, bytes, newest, oldest} - refreshed slowly
+$lastAgg = [datetime]::MinValue
+
+function Get-DriveOf($path) {
+  # 'D:\x\y' -> 'D'; '\\server\share\x' -> '' (UNC, no drive letter)
+  $m = [regex]::Match($path, '^([A-Za-z]):')
+  if ($m.Success) { return $m.Groups[1].Value.ToUpper() }
+  return ''
+}
+
+function Write-Status {
+  $drive = Get-DriveOf $root
+  $freeGB = $null; $usedGB = $null; $totalGB = $null
+  if ($drive) {
+    try {
+      $d = Get-PSDrive $drive -ErrorAction Stop
+      $freeGB = [math]::Round($d.Free / 1GB, 2)
+      $totalGB = [math]::Round(($d.Used + $d.Free) / 1GB, 2)
+      $usedGB = [math]::Round($d.Used / 1GB, 2)
+    } catch {}
+  }
+
+  $now = Get-Date
+  $camList = @()
+  foreach ($c in $cameras) {
+    $f = $outFile[$c]
+    $sz = 0; $wrote = $null
+    if ($f -and (Test-Path $f)) {
+      $item = Get-Item $f -ErrorAction SilentlyContinue
+      if ($item) { $sz = $item.Length; $wrote = $item.LastWriteTime }
+    }
+    $p = $procs[$c]
+    $alive = $false
+    try { if ($p) { $p.Refresh(); $alive = -not $p.HasExited } } catch {}
+    $silent = if ($lastChange[$c]) { [math]::Round(($now - $lastChange[$c]).TotalSeconds) } else { $null }
+    $state = 'down'
+    if ($alive) { $state = if ($silent -ne $null -and $silent -gt ($stallMinutes * 60)) { 'stalled' } else { 'recording' } }
+    $a = $agg[$c]
+    $camList += [ordered]@{
+      camera    = $c
+      state     = $state
+      pid       = if ($alive) { $p.Id } else { $null }
+      currentMB = [math]::Round($sz / 1MB, 2)
+      written   = if ($wrote) { $wrote.ToString('HH:mm:ss') } else { $null }
+      silentSec = $silent
+      restarts  = $restarts[$c]
+      files     = if ($a) { $a.files } else { $null }
+      totalGB   = if ($a) { [math]::Round($a.bytes / 1GB, 3) } else { $null }
+      newest    = if ($a) { $a.newest } else { $null }
+      oldest    = if ($a) { $a.oldest } else { $null }
+    }
+  }
+
+  $totFiles = 0; $totBytes = 0
+  foreach ($c in $agg.Keys) { $totFiles += $agg[$c].files; $totBytes += $agg[$c].bytes }
+
+  $obj = [ordered]@{
+    generated       = $now.ToString('o')
+    root            = $root
+    drive           = $drive
+    segmentMinutes  = $segmentMinutes
+    keepDays        = $keepDays
+    minFreeGB       = $minFreeGB
+    stallMinutes    = $stallMinutes
+    disk            = [ordered]@{ freeGB = $freeGB; usedGB = $usedGB; totalGB = $totalGB }
+    totals          = [ordered]@{ files = $totFiles; gb = [math]::Round($totBytes / 1GB, 3) }
+    cameras         = $camList
+  }
+  try {
+    $obj | ConvertTo-Json -Depth 5 | Set-Content -Path $statusFile -Encoding utf8
+  } catch {
+    Log ("WARNING   could not write status file: {0}" -f $_.Exception.Message)
+  }
+}
+
+function Refresh-Aggregates {
+  foreach ($c in $cameras) {
+    $d = Join-Path $root $c
+    $f = @(Get-ChildItem $d -File -Filter *.mp4 -ErrorAction SilentlyContinue)
+    $bytes = 0
+    foreach ($x in $f) { $bytes += $x.Length }
+    $sorted = $f | Sort-Object LastWriteTime
+    $agg[$c] = @{
+      files  = $f.Count
+      bytes  = $bytes
+      newest = if ($sorted.Count) { $sorted[-1].LastWriteTime.ToString('yyyy-MM-dd HH:mm') } else { $null }
+      oldest = if ($sorted.Count) { $sorted[0].LastWriteTime.ToString('yyyy-MM-dd HH:mm') } else { $null }
+    }
+  }
+}
+
+# The cameras carry PCMA (pcm_alaw) audio, which MP4 cannot store - copying it
+# straight through makes ffmpeg refuse to write the file at all
+# ("Could not find tag for codec pcm_alaw in stream"). So the video is copied
+# untouched and only the tiny 8 kHz audio track is converted to AAC.
+$videoArgs = @('-map','0:v:0','-map','0:a:0?','-c:v','copy','-c:a','aac','-b:a','32k','-ar','8000',
+               '-movflags','frag_keyframe+empty_moov+default_base_moof')
+
+function Start-Recorder($name) {
+  $dir = Join-Path $root $name
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $stamp = (Get-Date).ToString('yyyyMMdd_HHmmss')
+  $out = Join-Path $dir ("{0}_{1}.mp4" -f $name, $stamp)
+  $err = Join-Path $root ($name + '.err.log')
+
+  # One file per run, closed cleanly by ffmpeg's own -t limit, then the
+  # supervisor starts the next one. The segment muxer was tried first and it
+  # silently wrote nothing here (these streams carry no packet timestamps, which
+  # the segment muxer needs to rotate); a plain single-file write is reliable.
+  $a = @(
+    '-hide_banner','-loglevel','warning',
+    '-rtsp_transport','tcp',
+    '-i', "rtsp://127.0.0.1:8554/$name"
+  ) + $videoArgs + @(
+    '-t', ($segmentMinutes * 60),
+    '-y', $out
+  )
+  $p = Start-Process -FilePath $ff -ArgumentList $a -PassThru -NoNewWindow -RedirectStandardError $err
+  $procs[$name] = $p
+  $script:outFile[$name] = $out
+  $script:lastSize[$name] = 0
+  $script:lastChange[$name] = Get-Date
+  Log ("started   {0}  (pid {1}) -> {2}" -f $name, $p.Id, (Split-Path $out -Leaf))
+}
+
+function Clean-Empty {
+  # failed attempts leave 0-byte segments behind; clear them on startup
+  $n = 0
+  foreach ($cam in $cameras) {
+    Get-ChildItem (Join-Path $root $cam) -File -Filter *.mp4 -ErrorAction SilentlyContinue |
+      Where-Object { $_.Length -eq 0 } | ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue; $n++ }
+  }
+  if ($n -gt 0) { Log ("cleanup   removed {0} empty segment file(s)" -f $n) }
+}
+
+$minFreeGB = 30        # if D: drops below this, delete oldest recordings until it recovers
+
+function Prune-Old {
+  # 1) age-based sweep. Guard the retention value first: with $keepDays missing or
+  #    zero, $cut becomes "now" and the sweep below would delete EVERY recording.
+  if (-not $keepDays -or [int]$keepDays -lt 1) {
+    Log ("WARNING   retention is not set (keepDays='{0}') - SKIPPING the age sweep" -f $keepDays)
+  } else {
+    $cut = (Get-Date).AddDays(-[int]$keepDays)
+    $freed = 0; $n = 0
+    foreach ($cam in $cameras) {
+      Get-ChildItem (Join-Path $root $cam) -File -Filter *.mp4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt $cut } | ForEach-Object {
+          $freed += $_.Length; $n++
+          Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if ($n -gt 0) { Log ("pruned    age sweep: {0} file(s), {1:N0} MB" -f $n, ($freed/1MB)) }
+  }
+
+  # 2) free-space floor. Delete oldest-first until the drive is above the floor,
+  #    otherwise recordings would fill D: and take VMS's storage with them too.
+  $freeGB = [math]::Round((Get-PSDrive D).Free / 1GB, 1)
+  if ($freeGB -lt $minFreeGB) {
+    Log ("WARNING   D: free {0} GB is below the {1} GB floor - deleting oldest recordings" -f $freeGB, $minFreeGB)
+    $tries = 0
+    while ((Get-PSDrive D).Free / 1GB -lt $minFreeGB -and $tries -lt 500) {
+      $oldest = $null
+      foreach ($cam in $cameras) {
+        $c = Get-ChildItem (Join-Path $root $cam) -File -Filter *.mp4 -ErrorAction SilentlyContinue |
+             Sort-Object LastWriteTime | Select-Object -First 1
+        if ($c -and (-not $oldest -or $c.LastWriteTime -lt $oldest.LastWriteTime)) { $oldest = $c }
+      }
+      if (-not $oldest) { Log "          no recordings left to delete"; break }
+      $mb = [math]::Round($oldest.Length/1MB, 1)
+      Remove-Item $oldest.FullName -Force -ErrorAction SilentlyContinue
+      $tries++
+      if ($tries % 25 -eq 0) { Log ("          ...deleted {0} files, D: free {1} GB" -f $tries, [math]::Round((Get-PSDrive D).Free/1GB,1)) }
+    }
+    Log ("          deleted {0} oldest file(s); D: free now {1} GB" -f $tries, [math]::Round((Get-PSDrive D).Free/1GB,1))
+  } else {
+    Log ("status    D: free {0} GB (floor {1} GB), retention {2} days" -f $freeGB, $minFreeGB, $keepDays)
+  }
+}
+
+Log "=========== recorder starting ==========="
+Log ("cameras: {0}" -f ($cameras -join ', '))
+Log ("segment: {0} min   retention: {1} days" -f $segmentMinutes, $keepDays)
+
+# is go2rtc up before we start hammering it?
+try {
+  $null = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:1984/api/streams' -TimeoutSec 10
+  Log "go2rtc API reachable"
+} catch { Log "WARNING go2rtc API not reachable yet: $_" }
+
+foreach ($c in $cameras) { New-Item -ItemType Directory -Force -Path (Join-Path $root $c) | Out-Null }
+
+# a restarted service must not leave the previous run's ffmpeg still recording
+function Kill-Strays {
+  $n = 0
+  Get-CimInstance Win32_Process -Filter "Name = 'ffmpeg.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like "*$root*" } | ForEach-Object {
+      try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $n++ } catch {}
+    }
+  if ($n -gt 0) { Log ("cleanup   stopped {0} orphaned recorder process(es)" -f $n) }
+}
+Kill-Strays
+Start-Sleep -Seconds 2
+Clean-Empty
+
+foreach ($c in $cameras) { Start-Recorder $c }
+
+$lastPrune = Get-Date
+while ($true) {
+  Start-Sleep -Seconds 15
+  foreach ($c in $cameras) {
+    $p = $procs[$c]
+    if ($null -eq $p) { Start-Recorder $c; continue }
+    $p.Refresh()
+    if ($p.HasExited) {
+      $code = try { $p.ExitCode } catch { '?' }
+      Log ("EXITED    {0} (code {1}) - starting the next file" -f $c, $code)
+      $restarts[$c]++
+      Start-Recorder $c
+      continue
+    }
+
+    # stall watchdog: a recorder whose output stops growing is wedged (the
+    # camera dropped the session, go2rtc reconnected, ffmpeg kept waiting).
+    # Kill it so the supervisor starts a fresh connection.
+    $f = $outFile[$c]
+    $sz = 0
+    if ($f -and (Test-Path $f)) { $sz = (Get-Item $f).Length }
+    if ($sz -ne $lastSize[$c]) {
+      $lastSize[$c] = $sz
+      $lastChange[$c] = Get-Date
+    } elseif (((Get-Date) - $lastChange[$c]).TotalMinutes -gt $stallMinutes) {
+      Log ("STALLED   {0} no output for {1} min at {2:N2} MB - restarting" -f $c, $stallMinutes, ($sz/1MB))
+      try { $p.Kill() } catch {}
+      $restarts[$c]++
+      Start-Sleep -Seconds 2
+      Start-Recorder $c
+    }
+  }
+
+  # aggregates are the expensive part (a stat per segment), so refresh them slowly
+  if (((Get-Date) - $lastAgg).TotalSeconds -ge 60) { Refresh-Aggregates; $lastAgg = Get-Date }
+  Write-Status
+
+  if (((Get-Date) - $lastPrune).TotalMinutes -ge $pruneEveryMin) {
+    Prune-Old
+    $lastPrune = Get-Date
+  }
+}

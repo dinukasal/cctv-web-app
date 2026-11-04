@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>CCTV</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px 16px 40px;
+    background: #0d1117; color: #e6edf3;
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  .hint { color: #8b949e; font-size: 12px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; overflow: hidden;
+          display: flex; flex-direction: column; }
+  .card.dragging { opacity: .55; outline: 2px dashed #1f6feb; }
+  .bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: #1c2430;
+         border-bottom: 1px solid #30363d; cursor: grab; }
+  .card.dragging .bar { cursor: grabbing; }
+  .grip { color: #6e7681; font-size: 13px; cursor: grab; user-select: none; flex: none; }
+  .grip:hover { color: #c9d1d9; }
+  .name { font-weight: 600; font-size: 13px; flex: 1; min-width: 0; overflow: hidden;
+          text-overflow: ellipsis; white-space: nowrap; }
+  .ip { color: #6e7681; font-size: 11px; font-weight: 400; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #d29922; transition: background .3s; flex: none; }
+  .dot.live { background: #3fb950; box-shadow: 0 0 6px #3fb950; }
+  .dot.dead { background: #f85149; }
+  .mode { font-size: 10px; color: #8b949e; text-transform: uppercase; letter-spacing: .5px; }
+  button, a.btn, select { font: inherit; font-size: 11px; padding: 3px 6px; border-radius: 6px; cursor: pointer;
+    background: #21262d; color: #c9d1d9; border: 1px solid #30363d; text-decoration: none; }
+  button:hover, a.btn:hover, select:hover { background: #30363d; }
+  button.on { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .stage { position: relative; background: #000; aspect-ratio: 4 / 3; }
+  .stage iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #000; }
+  /* while dragging, the players must not swallow the pointer events */
+  .grid.drag-active iframe { pointer-events: none; }
+  .recpanel { background: #161b22; border: 1px solid #30363d; border-radius: 10px; margin-bottom: 14px; }
+  .rechead { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: #1c2430;
+             border-bottom: 1px solid #30363d; flex-wrap: wrap; }
+  .rechead b { font-size: 13px; }
+  .rechead .hint { flex: 1; }
+  .recbody { padding: 10px 12px; }
+  .recstats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+              gap: 6px 16px; margin-bottom: 10px; }
+  .recstat { font-size: 12px; color: #8b949e; }
+  .recstat b { color: #e6edf3; font-weight: 600; }
+  .recrow { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 3px 0;
+            border-top: 1px solid #21262d; }
+  .recrow .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .recrow .v { color: #8b949e; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .recbar { height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; margin: 3px 0 8px; }
+  .recbar > i { display: block; height: 100%; background: #1f6feb; }
+  .recbar > i.warn { background: #d29922; }
+  .recpath { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px;
+             padding-top: 10px; border-top: 1px solid #30363d; }
+  .recpath input { font-size: 12px; padding: 4px 6px; border-radius: 6px; background: #21262d;
+                   color: #c9d1d9; border: 1px solid #30363d; }
+  .recpath input#recpathinput { flex: 1; min-width: 220px; }
+  .warn { color: #d29922; }
+  .bad { color: #f85149; }
+  .good { color: #3fb950; }
+  .evpanel { background: #161b22; border: 1px solid #30363d; border-radius: 10px; margin-bottom: 14px; }
+  .evhead { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: #1c2430;
+            border-bottom: 1px solid #30363d; flex-wrap: wrap; }
+  .evhead b { font-size: 13px; }
+  .evhead .hint { flex: 1; }
+  .evlist { display: grid; grid-template-columns: repeat(auto-fill, minmax(184px, 1fr));
+            gap: 10px; padding: 10px 12px; }
+  .ev { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+  .ev img { width: 100%; display: block; background: #000; aspect-ratio: 16 / 9; object-fit: cover; }
+  .ev .meta { padding: 6px 8px; font-size: 11px; color: #8b949e; line-height: 1.5; }
+  .ev .when { color: #c9d1d9; font-variant-numeric: tabular-nums; }
+  .ev .who { color: #e6edf3; font-weight: 600; }
+  .badge { display: inline-block; padding: 0 5px; border-radius: 4px; font-size: 10px;
+           border: 1px solid #30363d; background: #21262d; }
+  .badge.person { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .badge.none { color: #8b949e; }
+  .badge.unconf { color: #d29922; border-color: #d29922; }
+  footer { margin-top: 18px; color: #8b949e; font-size: 12px; line-height: 1.7; }
+  code { background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 1px 5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🏠 CCTV</h1>
+  <span class="hint" id="ctx">connecting…</span>
+  <button id="allhd">All HD</button>
+  <button id="allsub">All low</button>
+  <button id="mute" title="Mute or unmute every camera at once">🔇 Muted</button>
+  <a class="btn" href="/recordings" title="Browse recorded clips">📼 Recordings</a>
+  <button id="cfgsave" title="Download the whole camera configuration - streams, names, order, recorder settings - as one file">⤓ Save config</button>
+  <button id="cfgload" title="Restore the configuration from a saved file (everything is backed up first)">⤒ Load config</button>
+  <input type="file" id="cfgfile" accept=".json,application/json" style="display:none">
+  <span class="hint" id="cfgmsg"></span>
+</header>
+
+<section class="recpanel">
+  <div class="rechead">
+    <b>Recorder</b>
+    <span class="hint" id="recsummary">loading…</span>
+    <button id="recstart" title="Start recording">▶ start</button>
+    <button id="recstop" title="Stop recording">■ stop</button>
+    <button id="rectoggle" title="Show or hide the recorder details">show</button>
+  </div>
+  <div class="recbody" id="recbody" style="display:none">
+    <div class="recstats" id="recstats"></div>
+    <div id="reccams"></div>
+    <div class="recpath">
+      <span class="hint">save to</span>
+      <input id="recpathinput" spellcheck="false" placeholder="e.g. E:\cctv">
+      <span class="hint">keep</span>
+      <input id="reckeep" type="number" min="1" max="365" step="1" style="width:64px">
+      <span class="hint">days</span>
+      <button id="recsave">Save</button>
+      <span class="hint" id="recmsg"></span>
+    </div>
+  </div>
+</section>
+
+<section class="evpanel">
+  <div class="evhead">
+    <b>Camera events</b>
+    <span class="hint" id="evsummary">loading…</span>
+    <button id="evtoggle" title="Show or hide the event snapshots">show</button>
+  </div>
+  <div id="evbody" style="display:none"><div class="evlist" id="evlist"></div></div>
+</section>
+
+<div class="grid" id="grid"></div>
+
+<footer>
+  Relayed by <b>go2rtc</b> on the Windows laptop — <code>:1984</code> web API, <code>:8554</code> RTSP re-export,
+  <code>:8555</code> WebRTC. The H.265 cameras are transcoded to H.264 on the NVIDIA GPU.<br>
+  <b>✏️</b> renames a camera, and dragging a tile by its title bar reorders the grid — both are
+  saved on the server, so every device sees the same names and layout. Clearing a name
+  restores the default.<br>
+  Each tile tries its modes in order and falls back by itself; if one stays black, choose a
+  different mode from that tile's dropdown.
+</footer>
+
+<script>
+// The player is served through this same origin (:8880 -> go2rtc on :1984), not
+// straight from :1984, so every tile iframe is same-origin with this page. That is
+// what makes the mute button possible: a cross-origin iframe's <video> cannot be
+// touched from here at all.
+const HOST = location.hostname || "192.168.1.146";
+const IS_TUNNEL = location.protocol === 'https:';
+const MODES = IS_TUNNEL ? ['mse', 'hls', 'webrtc'] : ['webrtc', 'mse', 'hls'];
+const OVERRIDE = new URLSearchParams(location.search).get('mode');
+document.getElementById('ctx').textContent =
+  (IS_TUNNEL ? 'via tunnel' : 'on the local network') + ' · trying ' + MODES.join(' → ');
+
+// sub = low-bandwidth stream, hd = full resolution.
+// "name" is the default; a renamed camera is stored server-side under its IP.
+const CAMS = [
+  { name: "Garden Front", ip: "192.168.1.101", sub: "cam101", hd: "cam101_hd" },
+  { name: "Front Gate",   ip: "192.168.1.106", sub: "cam106", hd: "cam106_hd" },
+  { name: "Carport",      ip: "192.168.1.234", sub: "cam234", hd: "cam234_hd" },
+  { name: "Hall",         ip: "192.168.1.105", sub: "cam105", hd: "cam105_hd" },
+  { name: "Garage",       ip: "192.168.1.103", sub: "cam103", hd: "cam103_hd" },
+  { name: "Driveway",     ip: "192.168.1.104", sub: "cam104", hd: "cam104_hd" },
+  { name: "Side",         ip: "192.168.1.108", sub: "cam108", hd: "cam108_hd" },
+];
+for (const cam of CAMS) cam.def = cam.name;      // remembered so a cleared name can revert
+
+const grid = document.getElementById('grid');
+
+// ---------------------------------------------------------------- settings
+let NAMES = {};
+let ORDER = [];
+
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/names', { cache: 'no-store' });
+    const data = await r.json();
+    NAMES = data.names || {};
+    ORDER = data.order || [];
+  } catch (e) { /* fall back to the defaults */ }
+  for (const cam of CAMS) if (NAMES[cam.ip]) cam.name = NAMES[cam.ip];
+  if (ORDER.length) {
+    const pos = new Map(ORDER.map((ip, i) => [ip, i]));
+    CAMS.sort((a, b) => (pos.has(a.ip) ? pos.get(a.ip) : 999) - (pos.has(b.ip) ? pos.get(b.ip) : 999));
+  }
+}
+
+async function post(url, payload) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+  return data;
+}
+
+// ---------------------------------------------------------------- mute all
+// Browsers only autoplay muted video, so tiles start muted. The button flips
+// every tile at once, and the choice is remembered and re-applied to tiles that
+// load later (scrolling, mode changes, auto-fallback).
+const muteBtn = document.getElementById('mute');
+let MUTED = (localStorage.getItem('cctvMuted') ?? '1') === '1';
+const paintMute = () => {
+  muteBtn.textContent = MUTED ? '🔇 Muted' : '🔊 Sound on';
+  muteBtn.classList.toggle('on', !MUTED);
+};
+
+// The <video> inside a player iframe is created asynchronously, so try now and
+// keep retrying briefly rather than giving up on the first miss.
+function setTileMute(frame) {
+  const apply = () => {
+    let v = null;
+    try { v = frame.contentDocument && frame.contentDocument.querySelector('video'); } catch (e) { return true; }
+    if (!v) return false;
+    v.muted = MUTED;
+    v.volume = MUTED ? v.volume : 1;
+    if (!MUTED) v.play().catch(() => {});
+    return true;
+  };
+  if (apply()) return;
+  let tries = 0;
+  const t = setInterval(() => {
+    if (apply() || ++tries > 24) clearInterval(t);
+  }, 250);
+}
+
+function applyMuteAll() {
+  document.querySelectorAll('[data-frame]').forEach(f => { if (f.src && f.src !== 'about:blank') setTileMute(f); });
+}
+
+muteBtn.onclick = () => {
+  MUTED = !MUTED;
+  localStorage.setItem('cctvMuted', MUTED ? '1' : '0');
+  paintMute();
+  applyMuteAll();          // a real click, so browsers allow the unmute
+};
+paintMute();
+
+// ---------------------------------------------------------------- tiles
+const TILES = [];              // [{ip, card}] in current display order
+let DRAG_CARD = null;
+
+// Reordering is done with the CSS "order" property, never by moving the cards in
+// the DOM: re-inserting an iframe reloads its player, so a drag would blank every
+// tile it passed over.
+function paintOrder() {
+  TILES.forEach((t, i) => { t.card.style.order = i; });
+}
+
+async function saveOrder() {
+  ORDER = TILES.map(t => t.ip);
+  try { await post('/api/order', { order: ORDER }); } catch (e) { /* retry on the next drag */ }
+}
+
+function build() {
+  for (const cam of CAMS) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="bar">
+        <span class="dot" data-dot></span>
+        <span class="grip" title="Drag to reorder">⠿</span>
+        <span class="name"><span data-nm>${cam.name}</span> <span class="ip">${cam.ip}</span></span>
+        <span class="mode" data-mode></span>
+        <button data-sub class="on">Low</button>
+        <button data-hd>HD</button>
+        <select data-sel title="Stream mode"></select>
+        <button data-ren title="Rename this camera">✏️</button>
+        <a class="btn" data-full target="_blank" title="Open fullscreen">⛶</a>
+      </div>
+      <div class="stage"><iframe allow="autoplay; fullscreen" data-frame></iframe></div>`;
+    grid.appendChild(card);
+
+    const frame  = card.querySelector('[data-frame]');
+    const dot    = card.querySelector('[data-dot]');
+    const modeEl = card.querySelector('[data-mode]');
+    const sel    = card.querySelector('[data-sel]');
+    const bSub   = card.querySelector('[data-sub]');
+    const bHd    = card.querySelector('[data-hd]');
+    const nmEl   = card.querySelector('[data-nm]');
+
+    for (const m of MODES) sel.appendChild(new Option(m, m));
+    sel.value = OVERRIDE || MODES[0];
+
+    let stream  = cam.sub;
+    let attempt = MODES.indexOf(sel.value);
+    let timer   = null;
+
+    const stopTimer = () => { if (timer) { clearInterval(timer); timer = null; } };
+
+    // Same-origin now, so the tile can be watched and retried in the next mode
+    // automatically on the LAN as well as over the tunnel.
+    const watch = () => {
+      stopTimer();
+      const deadline = Date.now() + 14000;
+      timer = setInterval(() => {
+        let ready = -1;
+        try {
+          const v = frame.contentDocument.querySelector('video');
+          ready = v ? v.readyState : -1;
+        } catch (e) { stopTimer(); return; }
+        if (ready >= 2) { dot.className = 'dot live'; stopTimer(); return; }
+        if (Date.now() > deadline) {
+          stopTimer();
+          if (attempt < MODES.length - 1) { attempt++; sel.value = MODES[attempt]; load(); }
+          else dot.className = 'dot dead';
+        }
+      }, 1500);
+    };
+
+    const load = () => {
+      dot.className = 'dot';
+      const m = sel.value;
+      modeEl.textContent = m;
+      // relative on purpose - stays on :8880 so the iframe is same-origin with us
+      frame.src = `/stream.html?src=${stream}&mode=${m}&background=false&v=${Date.now()}`;
+      watch();
+    };
+
+    // re-apply the mute choice whenever a tile (re)starts
+    frame.addEventListener('load', () => { if (frame.src && frame.src !== 'about:blank' && MUTED) setTileMute(frame); });
+
+    const pick = (hd) => {
+      bSub.classList.toggle('on', !hd);
+      bHd.classList.toggle('on', hd);
+      stream  = hd ? cam.hd : cam.sub;
+      attempt = MODES.indexOf(sel.value);
+      load();
+    };
+
+    bSub.onclick = () => pick(false);
+    bHd.onclick  = () => pick(true);
+    sel.onchange = () => { attempt = MODES.indexOf(sel.value); load(); };
+    card.querySelector('[data-full]').href = `/stream.html?src=${cam.hd}&mode=${sel.value}`;
+
+    card.querySelector('[data-ren]').onclick = async () => {
+      const entered = prompt(`Name for ${cam.ip}`, NAMES[cam.ip] || cam.name);
+      if (entered === null) return;                    // cancelled
+      const name = entered.trim();
+      const before = nmEl.textContent;
+      nmEl.textContent = name || cam.def;              // optimistic; revert on failure
+      try {
+        const data = await post('/api/names', { key: cam.ip, name });
+        NAMES = data.names || {};
+        cam.name = NAMES[cam.ip] || cam.def;          // cleared name -> default
+        nmEl.textContent = cam.name;
+      } catch (e) {
+        nmEl.textContent = before;
+        alert('Could not save the name: ' + e.message);
+      }
+    };
+
+    // ---- drag to reorder (by the title bar) ----
+    card.draggable = true;
+    card.querySelector('.bar').addEventListener('mousedown', () => { card.draggable = true; });
+
+    card.addEventListener('dragstart', (e) => {
+      DRAG_CARD = card;
+      card.classList.add('dragging');
+      grid.classList.add('drag-active');            // stop the iframes eating the pointer
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', cam.ip); } catch (_) {}
+    });
+
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      grid.classList.remove('drag-active');
+      DRAG_CARD = null;
+      saveOrder();
+    });
+
+    // stop streams scrolled far off screen, resume when they come back
+    // ('about:blank' is a truthy string, so compare explicitly - a bare !frame.src
+    // never matches after blanking, which silently strands the tile forever)
+    const isBlank = () => !frame.src || frame.src === 'about:blank';
+    new IntersectionObserver(([e]) => {
+      if (!e.isIntersecting && !isBlank()) { stopTimer(); frame.src = 'about:blank'; }
+      else if (e.isIntersecting && isBlank()) load();
+    }, { threshold: 0 }).observe(card);
+
+    TILES.push({ ip: cam.ip, card });
+    load();
+  }
+
+  paintOrder();
+
+  document.getElementById('allhd').onclick  = () => document.querySelectorAll('[data-hd]').forEach(b => b.click());
+  document.getElementById('allsub').onclick = () => document.querySelectorAll('[data-sub]').forEach(b => b.click());
+}
+
+// one delegated dragover for the whole grid: work out where the dragged tile
+// should sit and repaint the order, without ever touching the DOM tree
+grid.addEventListener('dragover', (e) => {
+  if (!DRAG_CARD) return;
+  e.preventDefault();
+  const target = e.target.closest ? e.target.closest('.card') : null;
+  if (!target || target === DRAG_CARD) return;
+  const from = TILES.findIndex(t => t.card === DRAG_CARD);
+  const to   = TILES.findIndex(t => t.card === target);
+  if (from < 0 || to < 0) return;
+  const r = target.getBoundingClientRect();
+  let insertAt = (e.clientX - r.left) < r.width / 2 ? to : to + 1;
+  const moved = TILES.splice(from, 1)[0];
+  if (insertAt > from) insertAt--;
+  TILES.splice(insertAt, 0, moved);
+  paintOrder();
+});
+grid.addEventListener('drop', (e) => e.preventDefault());
+
+// ---------------------------------------------------------------- recorder
+// State comes from the recorder itself: the service rewrites a status file every
+// ~15s and the bridge serves it. When it is stopped the panel says so rather
+// than inventing numbers.
+const recSummary = document.getElementById('recsummary');
+const recStats   = document.getElementById('recstats');
+const recCams    = document.getElementById('reccams');
+const recMsg     = document.getElementById('recmsg');
+const recPathEl  = document.getElementById('recpathinput');
+const recKeepEl  = document.getElementById('reckeep');
+let recTouched = false;      // don't stomp on what the user is typing
+
+const gb = (v) => (v === null || v === undefined) ? '?' : (+v).toFixed(1) + ' GB';
+
+function friendlyName(folder) {
+  const cam = CAMS.find(c => c.hd === folder || c.sub === folder);
+  if (cam) return cam.name;
+  return (NAMES[folder] || folder).replace(/^Ch1_/, '');
+}
+
+function renderRecorder(d) {
+  REC_LAST = d;
+  const st = d.status || {};
+  const cams = st.cameras || [];
+  const nRec = cams.filter(c => c.state === 'recording').length;
+  const nStall = cams.filter(c => c.state === 'stalled').length;
+  const nDown = cams.filter(c => c.state === 'down').length;
+
+  if (!d.reporting) {
+    const rootCfg = st.root || (d.script && d.script.root) || '';
+    const m = rootCfg.match(/^([A-Za-z]):/);
+    const driveLetter = m ? m[1].toUpperCase() : null;
+    const available = driveLetter
+      ? (d.volumes || []).some(v => v.drive === driveLetter)
+      : true;
+    recSummary.innerHTML = `<span class="warn">not reporting</span>` +
+      ` · service ${(d.service || '?').toLowerCase()}` +
+      (String(d.start_type || '').toLowerCase() === 'disabled'
+        ? ` <span class="bad">(disabled — start will re-enable it)</span>` : '') +
+      (d.status_age_sec !== null && d.status_age_sec !== undefined
+        ? ` · last update ${d.status_age_sec}s ago` : ' · no status file yet') +
+      (rootCfg ? ` · configured: ${rootCfg}` : '') +
+      (driveLetter && !available
+        ? ` · <span class="bad">${driveLetter}: is not available — start will refuse</span>` : '');
+  } else {
+    recSummary.innerHTML =
+      `<span class="${(nStall || nDown) ? 'warn' : 'good'}">${nRec}/${cams.length} recording</span>` +
+      (nStall ? ` · <span class="warn">${nStall} stalled</span>` : '') +
+      (nDown ? ` · <span class="bad">${nDown} down</span>` : '') +
+      ` · updated ${d.status_age_sec}s ago` +
+      ` · service ${(d.service || '?').toLowerCase()}`;
+  }
+
+  // storage + settings
+  const root = st.root || (d.script && d.script.root) || '—';
+  const disk = st.disk || {};
+  const vols = d.volumes || [];
+  let html = '';
+  html += `<div class="recstat">location<br><b>${root}</b></div>`;
+  html += `<div class="recstat">recorded here<br><b>${st.totals ? st.totals.files : '?'} files` +
+          ` · ${gb(st.totals ? st.totals.gb : null)}</b></div>`;
+  html += `<div class="recstat">segment length<br><b>${st.segmentMinutes ?? (d.script && d.script.segmentMinutes) ?? '?'} min</b></div>`;
+  html += `<div class="recstat">retention<br><b>${st.keepDays ?? (d.script && d.script.keepDays) ?? '?'} days` +
+          `</b> · floor ${st.minFreeGB ?? (d.script && d.script.minFreeGB) ?? '?'} GB free</div>`;
+  if (disk.freeGB !== null && disk.freeGB !== undefined) {
+    const usedPct = disk.totalGB ? Math.min(100, Math.round(100 * (1 - disk.freeGB / disk.totalGB))) : 0;
+    html += `<div class="recstat">free on ${st.drive || ''}<br><b>${gb(disk.freeGB)}</b> of ${gb(disk.totalGB)}` +
+            `<div class="recbar"><i class="${(disk.freeGB < (st.minFreeGB || 30) * 2) ? 'warn' : ''}" ` +
+            `style="width:${usedPct}%"></i></div></div>`;
+  }
+  for (const v of vols) {
+    if (st.drive && v.drive === st.drive) continue;      // already shown above
+    const usedPct = v.totalGB ? Math.min(100, Math.round(100 * (1 - v.freeGB / v.totalGB))) : 0;
+    const low = v.freeGB < 30;
+    html += `<div class="recstat">${v.drive}: free<br><b class="${low ? 'warn' : ''}">${gb(v.freeGB)}</b>` +
+            ` of ${gb(v.totalGB)}<div class="recbar"><i class="${low ? 'warn' : ''}" ` +
+            `style="width:${usedPct}%"></i></div></div>`;
+  }
+  recStats.innerHTML = html;
+
+  // per camera
+  recCams.innerHTML = cams.length ? cams.map(c => {
+    const cls = c.state === 'recording' ? 'live' : (c.state === 'stalled' ? '' : 'dead');
+    const note = c.state === 'recording'
+      ? `${c.currentMB ?? 0} MB this file`
+      : (c.state === 'stalled' ? `no output for ${c.silentSec}s` : 'not running');
+    return `<div class="recrow">` +
+      `<span class="dot ${cls}"></span>` +
+      `<span class="nm">${friendlyName(c.camera)}</span>` +
+      `<span class="v">${note}</span>` +
+      `<span class="v">${c.files ?? '?'} files · ${c.totalGB ?? '?'} GB</span>` +
+      `<span class="v ${c.restarts > 3 ? 'warn' : ''}">${c.restarts} restart${c.restarts === 1 ? '' : 's'}</span>` +
+      `</div>`;
+  }).join('') : '<div class="hint">no camera detail (the recorder is not reporting)</div>';
+
+  if (!recTouched) {
+    recPathEl.value = st.root || (d.script && d.script.root) || '';
+    recKeepEl.value = st.keepDays ?? (d.script && d.script.keepDays) ?? '';
+  }
+}
+
+async function loadRecorder() {
+  try {
+    const r = await fetch('/api/recorder', { cache: 'no-store' });
+    renderRecorder(await r.json());
+  } catch (e) {
+    recSummary.textContent = 'cannot reach the bridge: ' + e.message;
+  }
+}
+
+document.getElementById('rectoggle').onclick = (e) => {
+  const hidden = document.getElementById('recbody').style.display === 'none';
+  document.getElementById('recbody').style.display = hidden ? '' : 'none';
+  e.target.textContent = hidden ? 'hide' : 'show';
+};
+
+recPathEl.addEventListener('input', () => { recTouched = true; });
+
+document.getElementById('recsave').onclick = async () => {
+  const path = recPathEl.value.trim();
+  const keepDays = parseInt(recKeepEl.value, 10);
+  if (!path) { recMsg.className = 'hint bad'; recMsg.textContent = 'give a folder first'; return; }
+  const running = REC_LAST && REC_LAST.reporting;
+  const warn = running
+    ? `\n\nThe recorder is RUNNING - it will be restarted to apply this.`
+    : `\n\nThe recorder is not running, so this takes effect when it next starts.`;
+  if (!confirm(`Save recordings to:\n${path}\n\nKeep ${keepDays || '?'} days.${warn}`)) return;
+  recMsg.className = 'hint';
+  recMsg.textContent = 'saving…';
+  try {
+    const r = await fetch('/api/recorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, keepDays: keepDays || undefined })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    recMsg.className = 'hint good';
+    recMsg.textContent = d.note;
+    recTouched = false;
+    loadRecorder();
+  } catch (e) {
+    recMsg.className = 'hint bad';
+    recMsg.textContent = e.message;
+  }
+};
+
+document.getElementById('recstart').onclick = () => recorderRun('start');
+document.getElementById('recstop').onclick  = () => recorderRun('stop');
+
+async function recorderRun(action) {
+  const target = (REC_LAST && REC_LAST.script && REC_LAST.script.root) || 'the configured folder';
+  if (action === 'start' &&
+      !confirm(`Start recording to:\n${target}\n\n` +
+               `Recording runs continuously from then on.`)) return;
+  if (action === 'stop' &&
+      !confirm(`Stop recording?\n\nThe current segment is closed. ` +
+               `Nothing is deleted.`)) return;
+  recMsg.className = 'hint';
+  recMsg.textContent = (action === 'start' ? 'starting…' : 'stopping…');
+  try {
+    const r = await fetch('/api/recorder/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    recMsg.className = 'hint good';
+    recMsg.textContent = (d.note || action + ' done') +
+      ` · service ${(d.service || '?').toLowerCase()}`;
+    loadRecorder();
+  } catch (e) {
+    recMsg.className = 'hint bad';
+    recMsg.textContent = e.message;
+  }
+}
+
+// ------------------------------------------------------- save / load config
+// One file holding the streams, camera names, tile order and recorder settings.
+// It contains the camera passwords, so it is fetched explicitly rather than
+// cached, and loading warns before it overwrites anything.
+const cfgMsg = document.getElementById('cfgmsg');
+
+document.getElementById('cfgsave').onclick = () => { window.location = '/api/config'; };
+
+document.getElementById('cfgload').onclick = () => document.getElementById('cfgfile').click();
+
+document.getElementById('cfgfile').onchange = async (ev) => {
+  const file = ev.target.files[0];
+  ev.target.value = '';                    // so the same file can be picked again
+  if (!file) return;
+  if (!confirm(`Restore the whole camera configuration from:\n\n${file.name}\n\n` +
+               'This rewrites go2rtc.yaml, cameras.json and the recorder settings, ' +
+               'then restarts the services. The current files are backed up first.')) return;
+  cfgMsg.className = 'hint';
+  cfgMsg.textContent = `applying ${file.name}…`;
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: await file.text(),
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      cfgMsg.className = 'bad';
+      cfgMsg.textContent = 'refused: ' + (d.error || 'unknown error');
+      alert('Configuration not applied:\n\n' + (d.error || 'unknown error'));
+      return;
+    }
+    cfgMsg.className = 'good';
+    cfgMsg.textContent = 'configuration applied';
+    const restarted = (d.restarts || [])
+      .map(x => `${x.service}${x.ok ? '' : ' FAILED'}`).join(', ');
+    alert('Configuration applied.\n\n' + (d.applied || []).join('\n') +
+          (restarted ? '\n\nrestarted: ' + restarted : '') +
+          (d.backups ? '\n\nprevious files backed up to:\n' + d.backups.folder : '') +
+          ((d.warnings || []).length ? '\n\nwarnings:\n' + d.warnings.join('\n') : ''));
+    setTimeout(() => location.reload(), 1500);
+  } catch (e) {
+    cfgMsg.className = 'bad';
+    cfgMsg.textContent = 'could not reach the bridge';
+  }
+};
+
+// ---------------------------------------------------------------- events
+// The cameras do their own detection and push ONVIF notifications; the collector
+// records them with a snapshot, and this just displays what it wrote.
+const evList = document.getElementById('evlist');
+const evSummary = document.getElementById('evsummary');
+
+const hhmmss = (s) => (s || '').split(' ')[1] || s || '';
+
+function renderEvents(d) {
+  const events = d.events || [];
+  if (!events.length) {
+    evSummary.textContent = 'none yet — they appear when a camera sees movement';
+    evList.innerHTML = '';
+    return;
+  }
+  const last = events[0];
+  evSummary.textContent = `${events.length} recent · latest ${hhmmss(last.time)} on ${last.camera || last.ip}`;
+  evList.innerHTML = events.slice(0, 24).map(e => {
+    let badge;
+    if (e.people === null || e.people === undefined) {
+      badge = '<span class="badge unconf" title="recorded before the detector was available">unconfirmed</span>';
+    } else if (e.people > 0) {
+      badge = `<span class="badge person">person${e.people > 1 ? ' ×' + e.people : ''}` +
+              `${e.confidence ? ' ' + e.confidence : ''}</span>`;
+    } else {
+      badge = '<span class="badge none">no person</span>';
+    }
+    const url = e.thumb ? '/eventthumb/' + encodeURIComponent(e.thumb) : '';
+    const img = url
+      ? `<a href="${url}" target="_blank" title="open full size"><img src="${url}" alt=""></a>`
+      : '<div style="aspect-ratio:16/9;background:#000"></div>';
+    return `<div class="ev">${img}<div class="meta">` +
+           `<span class="when">${hhmmss(e.time)}</span> · ` +
+           `<span class="who">${e.camera || e.ip}</span><br>${e.kind || 'event'} ${badge}</div></div>`;
+  }).join('');
+}
+
+async function loadEvents() {
+  try {
+    const r = await fetch('/api/events', { cache: 'no-store' });
+    renderEvents(await r.json());
+  } catch (e) {
+    evSummary.textContent = 'cannot reach the bridge';
+  }
+}
+
+document.getElementById('evtoggle').onclick = (e) => {
+  const body = document.getElementById('evbody');
+  const hidden = body.style.display === 'none';
+  body.style.display = hidden ? '' : 'none';
+  e.target.textContent = hidden ? 'hide' : 'show';
+};
+
+loadEvents();
+setInterval(loadEvents, 10000);
+
+let REC_LAST = null;
+
+loadSettings().then(build);
+loadRecorder();
+setInterval(loadRecorder, 10000);
+</script>
+</body>
+</html>

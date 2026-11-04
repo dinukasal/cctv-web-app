@@ -1,0 +1,20 @@
+[Unit]
+Description=YOLO person detector for the go2rtc stack (RTX 2060)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gpu-host
+Group=gpu-host
+WorkingDirectory=/home/gpu-host/yolo-detect
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+Environment=DETECT_MIN_FREE_MB=160
+ExecStart=/home/gpu-host/plate-blur-venv/bin/python /home/gpu-host/yolo-detect/detect_server.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

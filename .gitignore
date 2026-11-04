@@ -1,0 +1,29 @@
+# ---- binaries (large, re-downloadable) ----
+*.exe
+
+# ---- runtime logs ----
+*.log
+*.out.log
+*.err.log
+
+# ---- credentials ----
+# go2rtc.yaml holds the camera stream URLs *with the camera passwords in them*.
+# The sanitised stand-in, go2rtc.yaml.example, is committed instead.
+go2rtc.yaml
+
+# ---- runtime state (changes constantly, not source) ----
+cameras.json
+*.tmp
+
+# ---- recordings never belong in git ----
+Records/
+event-thumbs/
+__pycache__/
+detect-test/
+*.jpg
+
+# ---- personal runtime state / private backups ----
+events.jsonl
+recorder-status.json
+prereboot-files.txt
+config-backups/
